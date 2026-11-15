@@ -2,13 +2,15 @@ name: Publish RSI dashboard
 
 on:
   schedule:
-    - cron: "17 11 * * 1-5"   # 4:47 PM IST, Monday to Friday, after the NSE close
+    - cron: "47 6 * * 1-5"    # 12:17 PM IST, Mon–Fri (midday, provisional)
+    - cron: "17 11 * * 1-5"   # 4:47 PM IST, Mon–Fri (after the NSE close)
   workflow_dispatch: {}        # "Run workflow" button for a manual refresh
 
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write               # lets the keep-alive step re-enable this schedule
 
 concurrency:
   group: pages
@@ -43,3 +45,11 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+  keepalive:
+    # Re-enables this workflow on every run so GitHub's 60-day inactivity pause never kicks in.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep the schedule active
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable publish.yml --repo "${{ github.repository }}"
