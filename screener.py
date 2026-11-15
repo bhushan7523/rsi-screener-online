@@ -67,7 +67,7 @@ def yahoo_closes(symbols: list[str]) -> dict[str, pd.Series]:
     tickers = [f"{s.upper()}.NS" for s in symbols]
     import usage
     usage.record("yahoo", 1)
-    data = yf.download(tickers, period="9mo", interval="1d", auto_adjust=True,
+    data = yf.download(tickers, period="3y", interval="1d", auto_adjust=True,
                        group_by="ticker", progress=False, threads=True)
     out = {}
     for s, t in zip(symbols, tickers):
@@ -88,23 +88,59 @@ def angel_configured() -> bool:
                ("ANGEL_API_KEY", "ANGEL_CLIENT_ID", "ANGEL_PIN", "ANGEL_TOTP_SECRET"))
 
 
+def resample_closes(close: pd.Series, rule: str) -> pd.Series:
+    """Last close of each week ('W') or month ('M'). The current period counts as 'so far'."""
+    if rule == "W":
+        return close.resample("W-FRI").last().dropna()
+    try:
+        return close.resample("ME").last().dropna()
+    except ValueError:  # older pandas
+        return close.resample("M").last().dropna()
+
+
+def rsi_pair(close: pd.Series) -> tuple[float | None, float | None, list]:
+    """Latest RSI, previous RSI and recent RSI values for a close series (None if too short)."""
+    if len(close) <= RSI_PERIOD + 1:
+        return None, None, []
+    rsi = wilder_rsi(close).dropna()
+    if len(rsi) < 2:
+        return None, None, []
+    return round(float(rsi.iloc[-1]), 2), round(float(rsi.iloc[-2]), 2), [round(float(v), 2) for v in rsi.iloc[-60:]]
+
+
+def alignment(signals: list) -> str:
+    """How many timeframes agree with the daily signal, e.g. 'Bullish 3/3'."""
+    known = [x for x in signals if x]
+    if not known:
+        return ""
+    lead = known[0]
+    return f"{lead} {sum(1 for x in known if x == lead)}/{len(known)}"
+
+
 def screen(closes: dict[str, pd.Series], history: dict | None = None) -> pd.DataFrame:
     rows = []
     for sym, close in closes.items():
         close = close.dropna()
-        if len(close) <= RSI_PERIOD + 1:
+        close.index = pd.to_datetime(close.index)
+        if getattr(close.index, "tz", None) is not None:
+            close.index = close.index.tz_localize(None)
+        d, d_prev, d_hist = rsi_pair(close)
+        if d is None:
             print(f"  ! {sym}: not enough price history", file=sys.stderr)
             continue
-        rsi = wilder_rsi(close).dropna()
+        w, w_prev, w_hist = rsi_pair(resample_closes(close, "W"))
+        m, m_prev, m_hist = rsi_pair(resample_closes(close, "M"))
         if history is not None:
-            history[sym] = [round(float(v), 2) for v in rsi.iloc[-60:]]
+            history[sym] = {"d": d_hist, "w": w_hist[-52:], "m": m_hist[-36:]}
+        sig = lambda v: classify(v) if v is not None else None
         rows.append({
             "symbol": sym,
-            "date": pd.Timestamp(rsi.index[-1]).date().isoformat(),
+            "date": pd.Timestamp(close.index[-1]).date().isoformat(),
             "close": round(float(close.iloc[-1]), 2),
-            "rsi": round(float(rsi.iloc[-1]), 2),
-            "prev_rsi": round(float(rsi.iloc[-2]), 2),
-            "signal": classify(float(rsi.iloc[-1])),
+            "rsi": d, "prev_rsi": d_prev, "signal": sig(d),
+            "rsi_w": w, "prev_rsi_w": w_prev, "signal_w": sig(w),
+            "rsi_m": m, "prev_rsi_m": m_prev, "signal_m": sig(m),
+            "alignment": alignment([sig(d), sig(w), sig(m)]),
         })
     if not rows:
         return pd.DataFrame()
@@ -155,8 +191,11 @@ def main() -> None:
     df["source"] = df["symbol"].map(used)
 
     print(f"\nSource: {names[source]}" + (" (+ Yahoo fallback)" if (df["source"] != names[source]).any() else "") + "\n")
-    show = df if (df["source"] != names[source]).any() else df.drop(columns="source")
-    print(show.to_string(index=False))
+    cols = ["symbol", "close", "rsi", "signal", "rsi_w", "signal_w", "rsi_m", "signal_m"]
+    if (df["source"] != names[source]).any():
+        cols.append("source")
+    print(df[cols].rename(columns={"rsi": "daily", "signal": "d_sig", "rsi_w": "weekly", "signal_w": "w_sig",
+                                   "rsi_m": "monthly", "signal_m": "m_sig"}).to_string(index=False))
     print()
     for s in ("Bullish", "Sideways", "Bearish"):
         members = ", ".join(df.loc[df.signal == s, "symbol"]) or "-"
