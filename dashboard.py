@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime
 
-LAYOUT_VERSION = "5"  # bump when the page design changes
+LAYOUT_VERSION = "6"  # bump when the page design changes
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -69,7 +69,7 @@ th.num,td.num{text-align:right}
       <thead><tr><th>Source</th><th>Status</th><th class="num">Calls today</th><th class="num">Daily limit</th><th class="num">Left today</th><th>Notes</th></tr></thead>
       <tbody></tbody>
     </table></div>
-    <p class="note" style="margin:10px 0 0">Calls are counted on this Mac and reset at midnight. Yahoo uses 1 call per refresh for all stocks; Tapetide and Angel One use 1 call per stock.</p>
+    <p class="note" id="limnote" style="margin:10px 0 0">Calls are counted on this Mac and reset at midnight. Yahoo uses 1 call per refresh for all stocks; Tapetide and Angel One use 1 call per stock.</p>
   </section>
   <section class="cards">
     <div class="card bull" data-f="Bullish"><h3>Bullish</h3><div class="big" id="n-Bullish">0</div><div class="rule">RSI above 60</div></div>
@@ -236,13 +236,36 @@ if (["127.0.0.1", "localhost"].includes(location.hostname)) {
     btn.disabled = false; btn.textContent = "Refresh data";
   })).catch(() => {});
 } else if (DATA.online) {
-  // Online (GitHub Pages): updates run on GitHub; the button opens the "Run workflow" page.
+  // Online (shared page): updates run automatically on a schedule, so there is no Refresh button.
   const on = DATA.online;
-  setupControls(on, (source, btn, st) => {
-    window.open(on.run_url, "_blank", "noopener");
-    st.textContent = "On GitHub, press \u201cRun workflow\u201d. Reload this page in about 2 minutes.";
-  }, on.schedule);
-  document.getElementById("refresh").title = "Opens GitHub to run an update";
+  setupControls(on, () => {}, null);
+  document.getElementById("refresh").hidden = true;
+  document.getElementById("srcsel").closest("label").hidden = true;
+  const nextUpdate = () => {
+    // Scheduled runs: Mon–Fri at 12:17 and 16:47 India time (UTC+5:30).
+    const IST = 330 * 60000, slots = [[12, 17], [16, 47]];
+    const nowIst = new Date(Date.now() + IST);
+    for (let d = 0; d < 8; d++) {
+      const day = new Date(Date.UTC(nowIst.getUTCFullYear(), nowIst.getUTCMonth(), nowIst.getUTCDate() + d));
+      const wd = day.getUTCDay();
+      if (wd === 0 || wd === 6) continue;
+      for (const [h, m] of slots) {
+        const t = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), h, m) - IST;
+        if (t > Date.now()) return new Date(t);
+      }
+    }
+    return null;
+  };
+  const nu = nextUpdate();
+  const fmtIst = dt => dt.toLocaleString("en-IN", {timeZone: "Asia/Kolkata", weekday: "short", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit"}) + " IST";
+  const st = document.getElementById("rstat");
+  st.innerHTML = "";
+  const line = (label, value) => { const d = document.createElement("div"); const b = document.createElement("b"); b.textContent = label + " "; d.appendChild(b); d.appendChild(document.createTextNode(value)); st.appendChild(d); };
+  line("Last updated:", "__GENERATED__");
+  if (nu) line("Next update:", fmtIst(nu) + " (about 2 minutes to appear)");
+  line("Schedule:", "Mon–Fri, 12:17 PM (provisional, market open) and 4:47 PM (final, after close)");
+  st.style.textAlign = "left"; st.style.fontSize = "13px"; st.style.lineHeight = "1.6";
+  document.getElementById("limnote").textContent = "Calls counted for today's updates of this page. Each update uses 1 Yahoo Finance call for all stocks.";
 }
 </script>
 </body>
@@ -300,9 +323,8 @@ def online_info(source_label: str) -> dict | None:
     if os.environ.get("GITHUB_ACTIONS") != "true":
         return None
     import usage
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
     sources = [
-        {"id": "yahoo", "label": "Yahoo Finance", "ready": True, "note": "Free, no limit · used for online updates"},
+        {"id": "yahoo", "label": "Yahoo Finance", "ready": True, "note": "Free, no limit · used for this page"},
         {"id": "tapetide", "label": "Tapetide", "ready": False, "note": "Not set up online (needs a paid plan)"},
         {"id": "angel", "label": "Angel One", "ready": False, "note": "Not set up online (needs an Angel One account)"},
     ]
@@ -312,6 +334,5 @@ def online_info(source_label: str) -> dict | None:
     return {
         "sources": sources,
         "last": "yahoo",
-        "run_url": f"https://github.com/{repo}/actions/workflows/publish.yml" if repo else "",
-        "schedule": "Auto-updates Mon–Fri 4:47 PM IST",
+        "schedule": "Updates Mon–Fri at 12:17 PM and 4:47 PM IST (the midday numbers are provisional until the close)",
     }
