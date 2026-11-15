@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 
-LAYOUT_VERSION = "4"  # bump when the page design changes
+LAYOUT_VERSION = "5"  # bump when the page design changes
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -60,7 +61,7 @@ th.num,td.num{text-align:right}
 <div class="wrap">
   <header class="top">
     <div><h1>RSI Screener</h1><p class="sub" id="summary"></p></div>
-    <div class="rstat" id="onlinenote" hidden style="max-width:280px">Updates automatically every weekday after the market closes. Last update __GENERATED__.</div><div id="rbox" hidden><label class="rstat" style="margin:0 8px 0 0">Fetch from <select class="dash-src" id="srcsel"></select></label><button class="refresh" id="refresh">Refresh data</button><div class="rstat" id="rstat">Last fetched __GENERATED__</div></div>
+    <div id="rbox" hidden><label class="rstat" style="margin:0 8px 0 0">Fetch from <select class="dash-src" id="srcsel"></select></label><button class="refresh" id="refresh">Refresh data</button><div class="rstat" id="rstat">Last fetched __GENERATED__</div></div>
   </header>
   <section class="panel" id="limits" hidden>
     <h2>Data source &amp; limits</h2>
@@ -193,50 +194,69 @@ document.querySelectorAll("th[data-k]").forEach(th => th.addEventListener("click
 let rt; window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(chart, 120); });
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
 summary(); render();
-if (location.protocol.startsWith("http") && !["127.0.0.1", "localhost"].includes(location.hostname)) document.getElementById("onlinenote").hidden = false;
-if (["127.0.0.1", "localhost"].includes(location.hostname)) {
+function setupControls(d, onRefresh, noteLine) {
   const box = document.getElementById("rbox"), btn = document.getElementById("refresh"), st = document.getElementById("rstat"), sel = document.getElementById("srcsel");
   box.hidden = false;
-  fetch("/sources").then(r => r.json()).then(d => {
-    for (const o of d.sources) {
-      const op = new Option(o.label + (o.ready ? "" : " (not set up)"), o.id);
-      op.disabled = !o.ready; op.title = o.note; sel.add(op);
-    }
-    sel.value = d.last;
-    const showQuota = () => {
-      const o = d.sources.find(x => x.id === sel.value);
-      if (o) st.textContent = `${o.label}: ${o.quota} · Last fetched __GENERATED__`;
-    };
-    sel.addEventListener("change", showQuota); showQuota();
-    const lt = document.querySelector("#ltbl tbody"); lt.innerHTML = "";
-    for (const o of d.sources) {
-      const q = o.usage || {};
-      const tr = document.createElement("tr");
-      const cells = [o.label + (o.id === d.last ? "  (selected)" : ""),
-        o.ready ? "Ready" : "Not set up",
-        String(q.calls ?? 0),
-        q.plan_based ? "Set by plan" : q.limit == null ? "No limit" : String(q.limit),
-        q.plan_based ? "—" : q.limit == null && q.remaining == null ? "Unlimited" : String(q.remaining ?? "—"),
-        o.note + (q.resets ? ` · resets ${new Date(q.resets).toLocaleTimeString("en-IN", {hour: "2-digit", minute: "2-digit"})}` : "")];
-      cells.forEach((t, i) => { const td = document.createElement("td"); td.textContent = t; if (i >= 2 && i <= 4) td.className = "num"; tr.appendChild(td); });
-      lt.appendChild(tr);
-    }
-    document.getElementById("limits").hidden = false;
-  }).catch(() => {});
-  btn.addEventListener("click", async () => {
+  for (const o of d.sources) {
+    const op = new Option(o.label + (o.ready ? "" : " (not set up)"), o.id);
+    op.disabled = !o.ready; op.title = o.note; sel.add(op);
+  }
+  sel.value = d.last;
+  const showQuota = () => {
+    const o = d.sources.find(x => x.id === sel.value);
+    if (o) st.textContent = `${o.label}: ${o.quota} · Last fetched __GENERATED__` + (noteLine ? ` · ${noteLine}` : "");
+  };
+  sel.addEventListener("change", showQuota); showQuota();
+  const lt = document.querySelector("#ltbl tbody"); lt.innerHTML = "";
+  for (const o of d.sources) {
+    const q = o.usage || {};
+    const tr = document.createElement("tr");
+    const cells = [o.label + (o.id === d.last ? "  (selected)" : ""),
+      o.ready ? "Ready" : "Not set up",
+      String(q.calls ?? 0),
+      q.plan_based ? "Set by plan" : q.limit == null ? "No limit" : String(q.limit),
+      q.plan_based ? "—" : q.limit == null && q.remaining == null ? "Unlimited" : String(q.remaining ?? "—"),
+      o.note + (q.resets ? ` · resets ${new Date(q.resets).toLocaleTimeString("en-IN", {hour: "2-digit", minute: "2-digit"})}` : "")];
+    cells.forEach((t, i) => { const td = document.createElement("td"); td.textContent = t; if (i >= 2 && i <= 4) td.className = "num"; tr.appendChild(td); });
+    lt.appendChild(tr);
+  }
+  document.getElementById("limits").hidden = false;
+  btn.addEventListener("click", () => onRefresh(sel.value, btn, st));
+}
+
+if (["127.0.0.1", "localhost"].includes(location.hostname)) {
+  // On the Mac: the local server fetches new data.
+  fetch("/sources").then(r => r.json()).then(d => setupControls(d, async (source, btn, st) => {
     btn.disabled = true; btn.textContent = "Fetching…"; st.textContent = "Getting fresh prices (about 20 seconds)";
     try {
-      const r = await fetch("/refresh", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({source: sel.value})});
+      const r = await fetch("/refresh", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({source})});
       if (r.ok) { location.reload(); return; }
       st.textContent = r.status === 409 ? "Already refreshing…" : "Refresh failed: " + (await r.text()).slice(-160);
     } catch (e) { st.textContent = "Can't reach the dashboard server. Is its Terminal window still open?"; }
     btn.disabled = false; btn.textContent = "Refresh data";
-  });
+  })).catch(() => {});
+} else if (DATA.online) {
+  // Online (GitHub Pages): updates run on GitHub; the button opens the "Run workflow" page.
+  const on = DATA.online;
+  setupControls(on, (source, btn, st) => {
+    window.open(on.run_url, "_blank", "noopener");
+    st.textContent = "On GitHub, press \u201cRun workflow\u201d. Reload this page in about 2 minutes.";
+  }, on.schedule);
+  document.getElementById("refresh").title = "Opens GitHub to run an update";
 }
 </script>
 </body>
 </html>
 """
+
+
+def _now_ist() -> str:
+    """Current time in India (GitHub's servers run on UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
+    except Exception:
+        return datetime.now().strftime("%d %b %Y, %I:%M %p")
 
 
 def payload_from_html(html: str) -> dict | None:
@@ -257,7 +277,7 @@ def build_html_from_payload(payload: dict, generated: str | None = None) -> str:
             .replace("__DATA__", data_json)
             .replace("__SOURCE__", payload.get("source", ""))
             .replace("__DATE__", payload.get("asof", ""))
-            .replace("__GENERATED__", generated or payload.get("generated") or datetime.now().strftime("%d %b %Y, %I:%M %p")))
+            .replace("__GENERATED__", generated or payload.get("generated") or _now_ist()))
 
 
 def build_html(df, history: dict, source: str) -> str:
@@ -267,6 +287,31 @@ def build_html(df, history: dict, source: str) -> str:
         "history": history,
         "source": source,
         "asof": max(r["date"] for r in rows) if rows else "",
-        "generated": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "generated": _now_ist(),
     }
+    online = online_info(source)
+    if online:
+        payload["online"] = online
     return build_html_from_payload(payload)
+
+
+def online_info(source_label: str) -> dict | None:
+    """When built on GitHub Actions, describe sources, limits and the refresh link for the online page."""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return None
+    import usage
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    sources = [
+        {"id": "yahoo", "label": "Yahoo Finance", "ready": True, "note": "Free, no limit · used for online updates"},
+        {"id": "tapetide", "label": "Tapetide", "ready": False, "note": "Not set up online (needs a paid plan)"},
+        {"id": "angel", "label": "Angel One", "ready": False, "note": "Not set up online (needs an Angel One account)"},
+    ]
+    for o in sources:
+        u = usage.summary(o["id"])
+        o["usage"], o["quota"] = u, u["text"]
+    return {
+        "sources": sources,
+        "last": "yahoo",
+        "run_url": f"https://github.com/{repo}/actions/workflows/publish.yml" if repo else "",
+        "schedule": "Auto-updates Mon–Fri 4:47 PM IST",
+    }
