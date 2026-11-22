@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime
 
-LAYOUT_VERSION = "7"  # bump when the page design changes
+LAYOUT_VERSION = "9"  # bump when the page design changes
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -79,13 +79,31 @@ th.num,td.num{text-align:right}
 .favhd{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
 .favmsg{font-size:12px;color:var(--bad);min-height:1em}
 .empty{color:var(--muted);font-size:14px;padding:6px 0}
+.search{position:relative}
+.search input{width:100%;font:inherit;font-size:16px;padding:12px 14px 12px 40px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--fg)}
+.search input:focus{outline:none;border-color:var(--fg)}
+.search .ic{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+.results{margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.res{display:grid;grid-template-columns:32px minmax(0,1fr) auto;align-items:center;gap:10px;padding:9px 12px;border-top:1px solid var(--line)}
+.res:first-child{border-top:0}
+.res.hl{background:var(--bg)}
+.res .nm{min-width:0}
+.res .nm b{font-size:14px}
+.res .nm div{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.res .vals{display:flex;gap:6px;align-items:center;font-size:12px;font-variant-numeric:tabular-nums;flex-wrap:wrap;justify-content:flex-end}
+.res .vals .px{color:var(--muted);margin-right:4px}
+.res .tfv{display:inline-flex;align-items:center;gap:4px}
+.res .tfv i{font-style:normal;color:var(--muted);font-weight:600}
+.resmore{padding:9px 12px;font-size:12px;color:var(--muted);border-top:1px solid var(--line)}
+.tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:1px}
+@media (max-width:640px){.res{grid-template-columns:32px minmax(0,1fr)}.res .vals{grid-column:2;justify-content:flex-start}.cards{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
     <div><h1>RSI Screener</h1><p class="sub" id="summary"></p></div>
-    <div id="rbox" hidden><label class="rstat" style="margin:0 8px 0 0">Fetch from <select class="dash-src" id="srcsel"></select></label><button class="refresh" id="refresh">Refresh data</button><div class="rstat" id="rstat">Last fetched __GENERATED__</div></div>
+    <div id="rbox" hidden><label class="rstat" style="margin:0 8px 0 0">Fetch from <select class="dash-src" id="srcsel"></select></label><button class="refresh" id="refresh" title="Fresh prices for the watchlist (about 20 seconds). Other NSE stocks keep the date of their last full load.">Refresh data</button> <button class="refresh" id="refreshall" title="Reload every NSE stock from Yahoo (10 to 20 minutes)">Refresh all NSE</button><div class="rstat" id="rstat">Last fetched __GENERATED__</div></div>
   </header>
   <section class="panel" id="limits" hidden>
     <h2>Data source &amp; limits</h2>
@@ -94,6 +112,11 @@ th.num,td.num{text-align:right}
       <tbody></tbody>
     </table></div>
     <p class="note" id="limnote" style="margin:10px 0 0">Calls are counted on this Mac and reset at midnight. Yahoo uses 1 call per refresh for all stocks; Tapetide and Angel One use 1 call per stock.</p>
+  </section>
+  <section class="search" id="searchbox">
+    <span class="ic" aria-hidden="true">⌕</span>
+    <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Search all NSE stocks by symbol or company name" aria-label="Search all NSE stocks" aria-controls="results">
+    <div class="results" id="results" role="listbox" hidden></div>
   </section>
   <section class="panel" id="favs">
     <div class="favhd"><h2>★ Favourites <span class="note" id="favcount"></span></h2><div class="favmsg" id="favmsg"></div></div>
@@ -125,7 +148,7 @@ th.num,td.num{text-align:right}
       </tr></thead><tbody></tbody>
     </table></div>
   </section>
-  <p class="note">RSI(14) on daily, weekly (Friday close) and monthly closing prices; the current week and month count as "so far". Agreement shows how many timeframes match the daily signal. Favourites are saved in this browser only. Click a card to filter; click a column to sort. Data: __SOURCE__. Generated __GENERATED__. A screen, not trading advice.</p>
+  <p class="note">RSI(14) on daily, weekly (Friday close) and monthly closing prices; the current week and month count as "so far". Agreement shows how many timeframes match the daily signal. Search covers every NSE-listed stock that has price data; stocks outside the watchlist appear in the chart and table once you star them. Favourites are saved in this browser only. Click a card to filter; click a column to sort. Data: __SOURCE__. Generated __GENERATED__. A screen, not trading advice.</p>
 </div>
 <div class="tip" id="tip"></div>
 <script>
@@ -146,12 +169,15 @@ const store = {
   set(k, v) { try { localStorage.setItem("rsi-screener:" + k, JSON.stringify(v)); } catch (e) {} }
 };
 const MAX_FAVS = 10;
-const symbols = new Set(DATA.rows.map(r => r.symbol));
+const ALL = DATA.rows;
+const BY_SYM = new Map(ALL.map(r => [r.symbol, r]));
+const symbols = new Set(BY_SYM.keys());
+const inList = r => r.in_list !== false;  // older data has no flag: every row is the watchlist
 let favs = store.get("favs", []).filter(s => symbols.has(s)).slice(0, MAX_FAVS);
 let tf = ["d", "w", "m"].includes(store.get("tf", "d")) ? store.get("tf", "d") : "d";
 if (!DATA.rows.some(r => r.rsi_w != null)) tf = "d";  // older data without weekly/monthly
 
-DATA.rows.forEach(r => {
+ALL.forEach(r => {
   r.change = r.prev_rsi == null ? null : +(r.rsi - r.prev_rsi).toFixed(2);
   const m = /(\w+) (\d)\/(\d)/.exec(r.alignment || "");
   r.agree_n = m ? (m[1] === "Bullish" ? 10 : m[1] === "Bearish" ? -10 : 0) + +m[2] : -99;
@@ -159,15 +185,20 @@ DATA.rows.forEach(r => {
 const K = () => TF[tf];
 const hist = (sym, t) => { const h = DATA.history[sym]; return Array.isArray(h) ? (t === "d" ? h : []) : ((h && h[t]) || []); };
 
+// The stocks shown in the cards, chart and table: the watchlist plus any starred stock.
+const VIEW = () => ALL.filter(r => inList(r) || favs.includes(r.symbol));
+
 function summary() {
-  const k = K(), withV = DATA.rows.filter(r => r[k.rsi] != null);
+  const k = K(), view = VIEW(), withV = view.filter(r => r[k.rsi] != null);
+  const nList = ALL.filter(inList).length, nExtra = view.length - nList;
+  const count = (nExtra ? `${nList} watchlist + ${nExtra} starred` : `${view.length} stocks`) + (ALL.length > nList ? ` · ${ALL.length.toLocaleString("en-IN")} NSE stocks searchable` : "");
   const s = withV.slice().sort((a,b) => b[k.rsi] - a[k.rsi]);
   const hi = s[0], lo = s[s.length-1];
   document.getElementById("summary").textContent = hi
-    ? `${DATA.rows.length} stocks · ${k.name.toLowerCase()} RSI strongest ${hi.symbol} (${fmt(hi[k.rsi])}), weakest ${lo.symbol} (${fmt(lo[k.rsi])}) · data as of ${DATA.asof}`
-    : `${DATA.rows.length} stocks · data as of ${DATA.asof}`;
+    ? `${count} · ${k.name.toLowerCase()} RSI strongest ${hi.symbol} (${fmt(hi[k.rsi])}), weakest ${lo.symbol} (${fmt(lo[k.rsi])}) · data as of ${DATA.asof}`
+    : `${count} · data as of ${DATA.asof}`;
   for (const g of ["Bullish","Sideways","Bearish"])
-    document.getElementById("n-"+g).textContent = DATA.rows.filter(r => r[k.sig] === g).length;
+    document.getElementById("n-"+g).textContent = view.filter(r => r[k.sig] === g).length;
   document.getElementById("charttitle").textContent = `${k.name} RSI by stock`;
   document.getElementById("trendhd").textContent = `${k.name} RSI trend`;
   document.getElementById("tfnote").textContent = tf === "d" ? "Cards, chart and filters use daily RSI"
@@ -175,7 +206,7 @@ function summary() {
   document.querySelectorAll("#tfbar button").forEach(b => b.classList.toggle("on", b.dataset.tf === tf));
 }
 
-function rows() { const k = K(); return DATA.rows.filter(r => !filter || r[k.sig] === filter); }
+function rows() { const k = K(); return VIEW().filter(r => !filter || r[k.sig] === filter); }
 
 function chart() {
   const box = document.getElementById("chart"); box.innerHTML = "";
@@ -251,7 +282,7 @@ function toggleFav(sym) {
   if (favs.includes(sym)) favs = favs.filter(s => s !== sym);
   else if (favs.length >= MAX_FAVS) { msg.textContent = `You can keep up to ${MAX_FAVS} favourites. Remove one first.`; return; }
   else favs.push(sym);
-  store.set("favs", favs); renderFavs(); table(); chart();
+  store.set("favs", favs); summary(); renderFavs(); table(); chart(); search();
 }
 
 function gaugeRow(label, v, sig) {
@@ -270,15 +301,15 @@ function renderFavs() {
   document.getElementById("favcount").textContent = `${favs.length} of ${MAX_FAVS}`;
   if (!favs.length) {
     const e = document.createElement("div"); e.className = "empty";
-    e.textContent = "Tap ☆ next to any stock in the table to pin it here. You can keep up to 10.";
+    e.textContent = `Search for any NSE stock above, or tap ☆ next to a stock in the table, to pin it here. You can keep up to ${MAX_FAVS}.`;
     grid.appendChild(e); return;
   }
   for (const sym of favs) {
-    const r = DATA.rows.find(x => x.symbol === sym); if (!r) continue;
+    const r = BY_SYM.get(sym); if (!r) continue;
     const c = document.createElement("div"); c.className = "fav";
     const hd = document.createElement("div"); hd.className = "hd";
     const left = document.createElement("div");
-    const sy = document.createElement("span"); sy.className = "sym"; sy.textContent = sym; left.appendChild(sy);
+    const sy = document.createElement("span"); sy.className = "sym"; sy.textContent = sym; sy.title = r.name || ""; left.appendChild(sy);
     const px = document.createElement("div"); px.className = "px";
     px.textContent = `₹${fmt(r.close)}` + (r.change == null ? "" : ` · day ${r.change > 0 ? "+" : ""}${fmt(r.change)}`);
     left.appendChild(px); hd.appendChild(left); hd.appendChild(starBtn(sym)); c.appendChild(hd);
@@ -300,7 +331,9 @@ function table() {
     const tr = document.createElement("tr");
     const td = (t, c) => { const d = document.createElement("td"); if (c) d.className = c; if (t instanceof Node) d.appendChild(t); else d.textContent = t; tr.appendChild(d); return d; };
     td(starBtn(r.symbol));
-    const s = td(r.symbol); if (r.source && r.source !== DATA.source) { const sm = document.createElement("div"); sm.className = "src"; sm.textContent = "via " + r.source; s.appendChild(sm); }
+    const s = td(r.symbol); s.title = r.name || "";
+    if (!inList(r)) { const t = document.createElement("span"); t.className = "tag"; t.textContent = "STARRED"; t.title = "Not in the watchlist: shown because you starred it"; s.appendChild(t); }
+    if (r.source && r.source !== DATA.source) { const sm = document.createElement("div"); sm.className = "src"; sm.textContent = "via " + r.source; s.appendChild(sm); }
     td(fmt(r.close), "num");
     td(rsiCell(r.rsi, r.signal), "num");
     td(r.change == null ? "—" : (r.change > 0 ? "+" : "") + fmt(r.change), "num " + (r.change > 0 ? "up" : r.change < 0 ? "down" : ""));
@@ -313,7 +346,64 @@ function table() {
   }
 }
 
-function render() { summary(); renderFavs(); chart(); table(); }
+// ---- Search over every NSE stock ----
+const MAX_RESULTS = 20;
+const norm = t => (t || "").toLowerCase().replace(/[^a-z0-9&]+/g, " ").replace(/\b(limited|ltd)\b/g, "").trim();
+ALL.forEach(r => { r._s = r.symbol.toLowerCase(); r._n = norm(r.name); });
+let hl = 0, lastHits = [];
+function matches(q) {
+  const s = q.toLowerCase().replace(/\s+/g, ""), n = norm(q);
+  if (!s) return [];
+  const scored = [];
+  for (const r of ALL) {
+    let sc = r._s === s ? 0 : r._s.startsWith(s) ? 1 : (n && (" " + r._n).includes(" " + n)) ? 2 : r._s.includes(s) ? 3 : (n && r._n.includes(n)) ? 4 : -1;
+    if (sc >= 0) scored.push([sc, r]);
+  }
+  scored.sort((a, b) => a[0] - b[0] || a[1].symbol.length - b[1].symbol.length || a[1].symbol.localeCompare(b[1].symbol));
+  return scored.map(x => x[1]);
+}
+function tfv(label, v, sig) {
+  const w = document.createElement("span"); w.className = "tfv";
+  const i = document.createElement("i"); i.textContent = label; w.appendChild(i);
+  const n = document.createElement("span"); n.textContent = fmt(v, 1); w.appendChild(n);
+  if (sig) { const p = document.createElement("span"); p.className = "pill sm " + sig; p.textContent = sig; w.appendChild(p); }
+  return w;
+}
+function search() {
+  const q = document.getElementById("q").value.trim(), box = document.getElementById("results");
+  box.innerHTML = "";
+  if (!q) { box.hidden = true; lastHits = []; return; }
+  const hits = matches(q); lastHits = hits.slice(0, MAX_RESULTS);
+  hl = Math.min(hl, Math.max(lastHits.length - 1, 0));
+  box.hidden = false;
+  if (!hits.length) { const e = document.createElement("div"); e.className = "resmore"; e.textContent = `No NSE stock matches "${q}".`; box.appendChild(e); return; }
+  lastHits.forEach((r, i) => {
+    const row = document.createElement("div"); row.className = "res" + (i === hl ? " hl" : ""); row.setAttribute("role", "option");
+    row.appendChild(starBtn(r.symbol));
+    const nm = document.createElement("div"); nm.className = "nm";
+    const b = document.createElement("b"); b.textContent = r.symbol; nm.appendChild(b);
+    if (inList(r)) { const t = document.createElement("span"); t.className = "tag"; t.textContent = "WATCHLIST"; nm.appendChild(t); }
+    const d = document.createElement("div"); d.textContent = r.name || ""; nm.appendChild(d);
+    row.appendChild(nm);
+    const v = document.createElement("div"); v.className = "vals";
+    const px = document.createElement("span"); px.className = "px"; px.textContent = "₹" + fmt(r.close) + (r.date && r.date !== DATA.asof ? " · " + new Date(r.date + "T00:00:00").toLocaleDateString("en-IN", {day: "2-digit", month: "short"}) : ""); v.appendChild(px);
+    v.appendChild(tfv("D", r.rsi, r.signal)); v.appendChild(tfv("W", r.rsi_w, r.signal_w)); v.appendChild(tfv("M", r.rsi_m, r.signal_m));
+    row.appendChild(v);
+    row.addEventListener("mouseenter", () => { hl = i; document.querySelectorAll("#results .res").forEach((x, j) => x.classList.toggle("hl", j === i)); });
+    box.appendChild(row);
+  });
+  if (hits.length > MAX_RESULTS) { const m = document.createElement("div"); m.className = "resmore"; m.textContent = `Showing ${MAX_RESULTS} of ${hits.length} matches. Type more to narrow it down.`; box.appendChild(m); }
+}
+const qEl = document.getElementById("q");
+qEl.addEventListener("input", () => { hl = 0; search(); });
+qEl.addEventListener("keydown", e => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); if (lastHits.length) { hl = (hl + (e.key === "ArrowDown" ? 1 : -1) + lastHits.length) % lastHits.length; search(); } }
+  else if (e.key === "Enter" && lastHits[hl]) { e.preventDefault(); toggleFav(lastHits[hl].symbol); }
+  else if (e.key === "Escape") { qEl.value = ""; search(); }
+});
+if (ALL.length <= ALL.filter(inList).length) qEl.placeholder = "Search the watchlist (refresh to load all NSE stocks)";
+
+function render() { summary(); renderFavs(); chart(); table(); search(); }
 
 document.querySelectorAll("#tfbar button").forEach(b => b.addEventListener("click", () => {
   tf = b.dataset.tf; store.set("tf", tf);
@@ -361,25 +451,31 @@ function setupControls(d, onRefresh, noteLine) {
     lt.appendChild(tr);
   }
   document.getElementById("limits").hidden = false;
-  btn.addEventListener("click", () => onRefresh(sel.value, btn, st));
+  btn.addEventListener("click", () => onRefresh(sel.value, btn, st, "list"));
+  const all = document.getElementById("refreshall");
+  all.addEventListener("click", () => onRefresh(sel.value, all, st, "all"));
 }
 
 if (["127.0.0.1", "localhost"].includes(location.hostname)) {
   // On the Mac: the local server fetches new data.
-  fetch("/sources").then(r => r.json()).then(d => setupControls(d, async (source, btn, st) => {
-    btn.disabled = true; btn.textContent = "Fetching…"; st.textContent = "Getting fresh prices (about 20 seconds)";
+  fetch("/sources").then(r => r.json()).then(d => setupControls(d, async (source, btn, st, scope) => {
+    const btns = [document.getElementById("refresh"), document.getElementById("refreshall")], label = btn.textContent;
+    btns.forEach(b => b.disabled = true); btn.textContent = "Fetching…";
+    st.textContent = scope === "all" ? "Loading every NSE stock from Yahoo (10 to 20 minutes). You can keep using this page meanwhile."
+                                     : "Getting fresh prices for the watchlist (about 20 seconds)";
     try {
-      const r = await fetch("/refresh", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({source})});
+      const r = await fetch("/refresh", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({source, scope})});
       if (r.ok) { location.reload(); return; }
       st.textContent = r.status === 409 ? "Already refreshing…" : "Refresh failed: " + (await r.text()).slice(-160);
     } catch (e) { st.textContent = "Can't reach the dashboard server. Is its Terminal window still open?"; }
-    btn.disabled = false; btn.textContent = "Refresh data";
+    btns.forEach(b => b.disabled = false); btn.textContent = label;
   })).catch(() => {});
 } else if (DATA.online) {
   // Online (shared page): updates run automatically on a schedule, so there is no Refresh button.
   const on = DATA.online;
   setupControls(on, () => {}, null);
   document.getElementById("refresh").hidden = true;
+  document.getElementById("refreshall").hidden = true;
   document.getElementById("srcsel").closest("label").hidden = true;
   const nextUpdate = () => {
     // Scheduled runs: Mon–Fri at 12:17 and 16:47 India time (UTC+5:30).
