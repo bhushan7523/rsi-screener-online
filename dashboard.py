@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime
 
-LAYOUT_VERSION = "9"  # bump when the page design changes
+LAYOUT_VERSION = "13"  # bump when the page design changes
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -95,6 +95,15 @@ th.num,td.num{text-align:right}
 .res .tfv{display:inline-flex;align-items:center;gap:4px}
 .res .tfv i{font-style:normal;color:var(--muted);font-weight:600}
 .resmore{padding:9px 12px;font-size:12px;color:var(--muted);border-top:1px solid var(--line)}
+.lt{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:12px}
+.lt button{font:600 13px/1 inherit;font-family:inherit;padding:8px 14px;border:0;background:transparent;color:var(--muted);cursor:pointer}
+.lt button+button{border-left:1px solid var(--line)}
+.lt button.on{background:var(--fg);color:var(--bg)}
+tr.favrow td{background:rgba(212,160,23,.07)}
+#chart{overflow-y:auto;overscroll-behavior:contain}
+#tblwrap{overflow:auto;overscroll-behavior:contain}
+#tbl thead th{position:sticky;top:0;background:var(--panel);z-index:1}
+.more{font-size:12px;color:var(--muted);margin-top:8px;min-height:1em}
 .tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:1px}
 @media (max-width:640px){.res{grid-template-columns:32px minmax(0,1fr)}.res .vals{grid-column:2;justify-content:flex-start}.cards{grid-template-columns:1fr}}
 </style>
@@ -135,11 +144,14 @@ th.num,td.num{text-align:right}
   </section>
   <section class="panel">
     <h2 id="charttitle">Daily RSI by stock</h2>
+    <div class="lt listtabs" role="tablist" aria-label="Which stocks to show"><button data-l="all" role="tab">All</button><button data-l="fav" role="tab">★ Favourites</button></div>
     <div class="chart" id="chart"></div>
+    <div class="more" id="chartmore"></div>
   </section>
   <section class="panel">
     <h2>Signals</h2>
-    <div class="tablewrap"><table id="tbl">
+    <div class="lt listtabs" id="listtabs" role="tablist" aria-label="Which stocks to list"><button data-l="all" role="tab">All</button><button data-l="fav" role="tab">★ Favourites</button></div>
+    <div class="tablewrap" id="tblwrap"><table id="tbl">
       <thead><tr>
         <th title="Favourite">★</th><th data-k="symbol">Stock</th><th data-k="close" class="num">Close (₹)</th>
         <th data-k="rsi" class="num">Daily RSI</th><th data-k="change" class="num">Day change</th>
@@ -147,6 +159,7 @@ th.num,td.num{text-align:right}
         <th data-k="agree_n">Agreement</th><th id="trendhd">Daily RSI trend</th><th data-k="date">Date</th>
       </tr></thead><tbody></tbody>
     </table></div>
+    <div class="more" id="tblmore"></div>
   </section>
   <p class="note">RSI(14) on daily, weekly (Friday close) and monthly closing prices; the current week and month count as "so far". Agreement shows how many timeframes match the daily signal. Search covers every NSE-listed stock that has price data; stocks outside the watchlist appear in the chart and table once you star them. Favourites are saved in this browser only. Click a card to filter; click a column to sort. Data: __SOURCE__. Generated __GENERATED__. A screen, not trading advice.</p>
 </div>
@@ -155,7 +168,7 @@ th.num,td.num{text-align:right}
 const DATA = __DATA__;
 const LO = 40, HI = 60;
 let filter = null, sortK = "rsi", sortDir = -1;
-const fmt = (v, d=2) => v == null ? "—" : Number(v).toLocaleString("en-IN", {minimumFractionDigits:d, maximumFractionDigits:d});
+const fmt = (v, d=2) => v == null || Number.isNaN(+v) ? "—" : Number(v).toLocaleString("en-IN", {minimumFractionDigits:d, maximumFractionDigits:d});
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const col = s => s === "Bullish" ? css("--ok") : s === "Bearish" ? css("--bad") : css("--mid");
 const NS = "http://www.w3.org/2000/svg";
@@ -173,6 +186,7 @@ const ALL = DATA.rows;
 const BY_SYM = new Map(ALL.map(r => [r.symbol, r]));
 const symbols = new Set(BY_SYM.keys());
 const inList = r => r.in_list !== false;  // older data has no flag: every row is the watchlist
+let listTab = store.get("listtab", "all") === "fav" ? "fav" : "all";
 let favs = store.get("favs", []).filter(s => symbols.has(s)).slice(0, MAX_FAVS);
 let tf = ["d", "w", "m"].includes(store.get("tf", "d")) ? store.get("tf", "d") : "d";
 if (!DATA.rows.some(r => r.rsi_w != null)) tf = "d";  // older data without weekly/monthly
@@ -211,8 +225,13 @@ function rows() { const k = K(); return VIEW().filter(r => !filter || r[k.sig] =
 function chart() {
   const box = document.getElementById("chart"); box.innerHTML = "";
   const k = K();
-  const data = rows().filter(r => r[k.rsi] != null).sort((a,b) => b[k.rsi] - a[k.rsi]);
-  if (!data.length) { box.textContent = "No stocks in this group."; return; }
+  const fav = r => favs.includes(r.symbol);
+  const data = rows().filter(r => r[k.rsi] != null && (listTab !== "fav" || fav(r)))
+    .sort((a,b) => (fav(b) - fav(a)) || b[k.rsi] - a[k.rsi]);  // favourites first, then strongest RSI
+  const SHOW = 10;
+  box.style.maxHeight = data.length > SHOW ? (22 + SHOW * 28 + 4) + "px" : "";
+  document.getElementById("chartmore").textContent = data.length > SHOW ? `Showing ${SHOW} of ${data.length} · scroll for more` : "";
+  if (!data.length) { box.textContent = listTab === "fav" && !favs.length ? "No favourites yet. Tap ☆ next to a stock, or search for one above." : "No stocks in this group."; return; }
   const W = Math.max(300, box.clientWidth), bh = 28, top = 22, bottom = 26;
   const svg = el("svg", {viewBox:`0 0 ${W} ${top + data.length*bh + bottom}`, width:"100%", role:"img", "aria-label":`${k.name} RSI per stock with 40 and 60 lines`}, box);
   const probe = el("text", {class:"lbl"}, svg); let lw = 0;
@@ -323,12 +342,29 @@ function renderFavs() {
   }
 }
 
+function syncTabs() {
+  const n = rows().length;
+  document.querySelectorAll(".listtabs button").forEach(b => {
+    b.classList.toggle("on", b.dataset.l === listTab); b.setAttribute("aria-selected", b.dataset.l === listTab);
+    b.textContent = b.dataset.l === "fav" ? `★ Favourites (${favs.length})` : `All (${n})`;
+  });
+}
 function table() {
   const tb = document.querySelector("#tbl tbody"); tb.innerHTML = "";
+  syncTabs();
   const val = (r, k) => r[k] == null ? -Infinity : r[k];
-  const data = rows().slice().sort((a,b) => (val(a,sortK) > val(b,sortK) ? 1 : val(a,sortK) < val(b,sortK) ? -1 : 0) * sortDir);
+  const isFav = r => favs.includes(r.symbol);
+  let data = rows();
+  if (listTab === "fav") data = data.filter(isFav);
+  // Favourites always stay at the top; the chosen column sorts within each group.
+  data = data.slice().sort((a,b) => (isFav(b) - isFav(a)) || (val(a,sortK) > val(b,sortK) ? 1 : val(a,sortK) < val(b,sortK) ? -1 : 0) * sortDir);
+  if (!data.length) {
+    const tr = document.createElement("tr"), td = document.createElement("td"); td.colSpan = 10; td.className = "empty";
+    td.textContent = listTab === "fav" ? (favs.length ? "None of your favourites are in this group." : "No favourites yet. Tap ☆ next to a stock, or search for one above.") : "No stocks in this group.";
+    tr.appendChild(td); tb.appendChild(tr); return;
+  }
   for (const r of data) {
-    const tr = document.createElement("tr");
+    const tr = document.createElement("tr"); if (isFav(r)) tr.className = "favrow";
     const td = (t, c) => { const d = document.createElement("td"); if (c) d.className = c; if (t instanceof Node) d.appendChild(t); else d.textContent = t; tr.appendChild(d); return d; };
     td(starBtn(r.symbol));
     const s = td(r.symbol); s.title = r.name || "";
@@ -344,6 +380,18 @@ function table() {
     td(new Date(r.date + "T00:00:00").toLocaleDateString("en-IN", {day:"2-digit", month:"short", year:"numeric"}));
     tb.appendChild(tr);
   }
+  fitTable(data.length);
+}
+
+// Show 10 rows; the rest scroll inside the table (the header stays visible).
+function fitTable(n) {
+  const SHOW = 10, wrap = document.getElementById("tblwrap"), trs = [...document.querySelectorAll("#tbl tbody tr")];
+  wrap.style.maxHeight = "";
+  if (n > SHOW) {
+    const h = document.querySelector("#tbl thead").offsetHeight + trs.slice(0, SHOW).reduce((a, r) => a + r.offsetHeight, 0);
+    wrap.style.maxHeight = (h + 2) + "px";
+  }
+  document.getElementById("tblmore").textContent = n > SHOW ? `Showing ${SHOW} of ${n} · scroll for more` : "";
 }
 
 // ---- Search over every NSE stock ----
@@ -379,7 +427,7 @@ function search() {
   if (!hits.length) { const e = document.createElement("div"); e.className = "resmore"; e.textContent = `No NSE stock matches "${q}".`; box.appendChild(e); return; }
   lastHits.forEach((r, i) => {
     const row = document.createElement("div"); row.className = "res" + (i === hl ? " hl" : ""); row.setAttribute("role", "option");
-    row.appendChild(starBtn(r.symbol));
+    const sb = starBtn(r.symbol); sb.addEventListener("click", closeSearch); row.appendChild(sb);
     const nm = document.createElement("div"); nm.className = "nm";
     const b = document.createElement("b"); b.textContent = r.symbol; nm.appendChild(b);
     if (inList(r)) { const t = document.createElement("span"); t.className = "tag"; t.textContent = "WATCHLIST"; nm.appendChild(t); }
@@ -395,10 +443,13 @@ function search() {
   if (hits.length > MAX_RESULTS) { const m = document.createElement("div"); m.className = "resmore"; m.textContent = `Showing ${MAX_RESULTS} of ${hits.length} matches. Type more to narrow it down.`; box.appendChild(m); }
 }
 const qEl = document.getElementById("q");
+function closeSearch() { qEl.value = ""; hl = 0; search(); qEl.blur(); }
+// Click anywhere outside the search box: close the results.
+document.addEventListener("click", e => { if (qEl.value && !document.getElementById("searchbox").contains(e.target)) closeSearch(); });
 qEl.addEventListener("input", () => { hl = 0; search(); });
 qEl.addEventListener("keydown", e => {
   if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); if (lastHits.length) { hl = (hl + (e.key === "ArrowDown" ? 1 : -1) + lastHits.length) % lastHits.length; search(); } }
-  else if (e.key === "Enter" && lastHits[hl]) { e.preventDefault(); toggleFav(lastHits[hl].symbol); }
+  else if (e.key === "Enter" && lastHits[hl]) { e.preventDefault(); toggleFav(lastHits[hl].symbol); closeSearch(); }
   else if (e.key === "Escape") { qEl.value = ""; search(); }
 });
 if (ALL.length <= ALL.filter(inList).length) qEl.placeholder = "Search the watchlist (refresh to load all NSE stocks)";
@@ -409,6 +460,9 @@ document.querySelectorAll("#tfbar button").forEach(b => b.addEventListener("clic
   tf = b.dataset.tf; store.set("tf", tf);
   if (["rsi", "rsi_w", "rsi_m"].includes(sortK)) sortK = K().rsi;
   render();
+}));
+document.querySelectorAll(".listtabs button").forEach(b => b.addEventListener("click", () => {
+  listTab = b.dataset.l; store.set("listtab", listTab); chart(); table();
 }));
 document.querySelectorAll(".card").forEach(c => c.addEventListener("click", () => {
   filter = filter === c.dataset.f ? null : c.dataset.f;
@@ -529,7 +583,13 @@ def payload_from_html(html: str) -> dict | None:
         return None
 
 
+def _clean(v):
+    """NaN (missing value from pandas) -> None, so the page gets null instead of NaN."""
+    return None if isinstance(v, float) and v != v else v
+
+
 def build_html_from_payload(payload: dict, generated: str | None = None) -> str:
+    payload = dict(payload, rows=[{k: _clean(v) for k, v in r.items()} for r in payload.get("rows", [])])
     data_json = json.dumps(payload, default=str).replace("</", "<\\/")
     return (TEMPLATE
             .replace("__LAYOUT__", LAYOUT_VERSION)
